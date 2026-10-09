@@ -39,47 +39,61 @@ if [ "${1:-}" = "--uninstall" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# prerequisites
+# locate or build the binary
 # ---------------------------------------------------------------------------
-
-command -v go >/dev/null || die "Go is required to build: https://go.dev/dl/"
-command -v pkg-config >/dev/null || die "pkg-config is required"
-
-if ! pkg-config --exists gtk+-3.0; then
-  die "GTK 3 development files are missing. On Debian/Ubuntu:
-       sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev"
-fi
-if ! pkg-config --exists webkit2gtk-4.1; then
-  die "WebKitGTK 4.1 development files are missing. On Debian/Ubuntu:
-       sudo apt install libwebkit2gtk-4.1-dev"
-fi
-
-# ---------------------------------------------------------------------------
-# build
-# ---------------------------------------------------------------------------
-
-echo "Building dsh-desktop:"
+#
+# This script ships in two places, so it must work in both:
+#   - a source checkout, where it builds from main.go
+#   - the release tarball, which has no source and only a prebuilt binary
 cd "$ROOT"
 mkdir -p dist
 
-# webview's bundled C library asks pkg-config for webkit2gtk-4.0, which modern
-# distributions no longer ship. pkgconfig/webkit2gtk-4.0.pc forwards to 4.1,
-# which is API-compatible for everything webview.h uses.
-export PKG_CONFIG_PATH="${ROOT}/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+if [ -f go.mod ]; then
+  command -v go >/dev/null || die "Go is required to build: https://go.dev/dl/"
+  command -v pkg-config >/dev/null || die "pkg-config is required"
 
-VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo 0.1.0)"
-go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o dist/dsh-desktop .
-say "built dist/dsh-desktop ($(du -h dist/dsh-desktop | cut -f1), version ${VERSION})"
+  if ! pkg-config --exists gtk+-3.0; then
+    die "GTK 3 development files are missing. On Debian/Ubuntu:
+       sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev"
+  fi
+  if ! pkg-config --exists webkit2gtk-4.1; then
+    die "WebKitGTK 4.1 development files are missing. On Debian/Ubuntu:
+       sudo apt install libwebkit2gtk-4.1-dev"
+  fi
+
+  echo "Building dsh-desktop:"
+
+  # webview's bundled C library asks pkg-config for webkit2gtk-4.0, which modern
+  # distributions no longer ship. pkgconfig/webkit2gtk-4.0.pc forwards to 4.1,
+  # which is API-compatible for everything webview.h uses.
+  export PKG_CONFIG_PATH="${ROOT}/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+
+  VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo 0.1.0)"
+  go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o dist/dsh-desktop .
+  say "built dist/dsh-desktop ($(du -h dist/dsh-desktop | cut -f1), version ${VERSION})"
+elif [ -x "${ROOT}/dsh-desktop" ]; then
+  echo "Using the prebuilt binary from this tarball."
+  cp "${ROOT}/dsh-desktop" dist/dsh-desktop
+else
+  die "found neither go.mod (to build) nor a prebuilt ./dsh-desktop (to install)"
+fi
+
+# The binary is what actually needs the runtime libraries, so check those even
+# when nothing was compiled here.
+if ! command -v pkg-config >/dev/null || ! pkg-config --exists webkit2gtk-4.1; then
+  say "warning: WebKitGTK 4.1 was not found. Install it before launching:"
+  say "  sudo apt install libwebkit2gtk-4.1-0"
+fi
 
 # ---------------------------------------------------------------------------
 # icons
 # ---------------------------------------------------------------------------
 
 if [ ! -f assets/icons/icon-256.png ]; then
-  if command -v python3 >/dev/null; then
+  if [ -f scripts/render-icons.py ] && command -v python3 >/dev/null; then
     python3 scripts/render-icons.py >/dev/null && say "rendered icons"
   else
-    say "warning: no icons and no python3 to render them; the launcher will use a generic icon"
+    say "warning: no icons available; the launcher will use a generic icon"
   fi
 fi
 

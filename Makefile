@@ -51,6 +51,8 @@ release: build
 	@cp $(BIN) README.md LICENSE THIRD_PARTY_NOTICES.md dist/dsh-desktop-$(VERSION)-linux-x86_64/
 	@mkdir -p dist/dsh-desktop-$(VERSION)-linux-x86_64/scripts
 	@cp scripts/install.sh dist/dsh-desktop-$(VERSION)-linux-x86_64/scripts/
+	@mkdir -p dist/dsh-desktop-$(VERSION)-linux-x86_64/assets
+	@cp -r assets/icons dist/dsh-desktop-$(VERSION)-linux-x86_64/assets/
 	@tar -C dist -czf dist/dsh-desktop-$(VERSION)-linux-x86_64.tar.gz dsh-desktop-$(VERSION)-linux-x86_64
 	@rm -rf dist/dsh-desktop-$(VERSION)-linux-x86_64
 	@echo "packaged dist/dsh-desktop-$(VERSION)-linux-x86_64.tar.gz"
