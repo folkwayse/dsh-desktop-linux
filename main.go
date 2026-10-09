@@ -65,17 +65,18 @@ var version = "0.1.0"
 var urlPattern = regexp.MustCompile(`https?://(?:127\.0\.0\.1|localhost):\d+/\?token=[A-Za-z0-9._~-]+`)
 
 type config struct {
-	profile    string
-	port       int
-	width      int
-	height     int
-	dshBin     string
-	url        string
-	debug      bool
-	noDmabuf   bool
-	safeRender bool
-	verbose    bool
-	selftest   time.Duration
+	profile     string
+	port        int
+	width       int
+	height      int
+	dshBin      string
+	url         string
+	debug       bool
+	noDmabuf    bool
+	safeRender  bool
+	opaqueMenus bool
+	verbose     bool
+	selftest    time.Duration
 }
 
 func main() {
@@ -131,6 +132,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&cfg.url, "url", "", "load this URL directly instead of booting a host (testing / attaching)")
 	fs.BoolVar(&cfg.debug, "debug", false, "enable the WebKit inspector")
 	fs.BoolVar(&cfg.noDmabuf, "no-dmabuf", true, "disable WebKit's DMA-BUF renderer (prevents the fatal \"Could not create GBM EGL display\" abort on some drivers); pass -no-dmabuf=false to re-enable")
+	fs.BoolVar(&cfg.opaqueMenus, "opaque-menus", true, "make the client's translucent menus opaque, so their labels stay readable (pass -opaque-menus=false to keep the upstream translucency)")
 	fs.BoolVar(&cfg.safeRender, "safe-render", false, "additionally disable WebKit compositing mode, for drivers that still render blank or garbled")
 	fs.BoolVar(&cfg.verbose, "verbose", false, "echo the host's output to stderr")
 	fs.DurationVar(&cfg.selftest, "selftest", 0, "load the app, inspect the rendered page, print a JSON report and exit (e.g. 20s)")
@@ -216,6 +218,7 @@ type app struct {
 	probeOnce sync.Once
 	probe     chan string
 	report    string
+	early     map[string]any // first-paint colour sample, for the self-test
 }
 
 func run(cfg config) int {
@@ -224,10 +227,16 @@ func run(cfg config) int {
 
 	w.SetTitle(appName)
 	w.SetSize(cfg.width, cfg.height, webview.HintNone)
-	w.SetHtml(loadingPage(cfg))
 
 	a := &app{cfg: cfg, w: w, log: newTail(8 << 10), probe: make(chan string, 1)}
 	a.alive.Store(true)
+
+	// Schedule the probe before the first paint. It fires once, `selftest` after
+	// startup, so it samples whatever is on screen by then: the boot screen when
+	// the host is still starting (or never starts), the app once it has loaded.
+	// Scheduling it from navigate() alone would make the boot screen unmeasurable.
+	w.SetHtml(loadingPage(cfg))
+	a.scheduleProbe()
 
 	// Collect page-level failures so the self-test can report a real reason
 	// instead of just "the root element is missing".
@@ -239,9 +248,23 @@ func run(cfg config) int {
   window.addEventListener('unhandledrejection', function(e){
     window.__dshErrors.push('unhandled rejection: ' + String(e && e.reason));
   });
+` + readableSurfacesJS(cfg) + `
 })();`)
 
 	if cfg.selftest > 0 {
+		// The early sample is reported through its own binding because navigating
+		// to the app replaces the document, which would wipe any window global.
+		if err := w.Bind("__dshEarlyPaint", func(payload string) {
+			var m map[string]any
+			if json.Unmarshal([]byte(payload), &m) == nil {
+				a.mu.Lock()
+				a.early = m
+				a.mu.Unlock()
+			}
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "dsh-desktop: cannot bind early-paint probe:", err)
+			return 2
+		}
 		if err := w.Bind("__dshSelfTest", func(payload string) {
 			select {
 			case a.probe <- payload:
@@ -300,6 +323,18 @@ func (a *app) scheduleProbe() {
 	}
 	a.probeOnce.Do(func() {
 		go func() {
+			// Sample the canvas almost immediately: if WebKit paints white before
+			// the boot screen's stylesheet lands, this is where it shows up.
+			time.Sleep(250 * time.Millisecond)
+			a.w.Dispatch(func() {
+				a.w.Eval(`(function(){
+  function sample() {
+    var cs = getComputedStyle(document.body);
+    return { body: cs.backgroundColor, html: getComputedStyle(document.documentElement).backgroundColor, text: (document.body ? (document.body.innerText || '').slice(0, 30) : '') };
+  }
+  __dshEarlyPaint(JSON.stringify(sample()));
+})();`)
+			})
 			time.Sleep(a.cfg.selftest)
 			a.w.Dispatch(func() {
 				a.w.Eval(`(function(){
@@ -322,6 +357,22 @@ func (a *app) scheduleProbe() {
 })();`)
 			})
 			time.Sleep(newSessionSettle)
+			// Open the agent-preset picker so the probe can inspect its surface.
+			a.w.Dispatch(func() {
+				a.w.Eval(`(function(){
+  var nodes = document.querySelectorAll('button');
+  for (var i = 0; i < nodes.length; i++) {
+    var t = (nodes[i].textContent || '').trim();
+    if (/^(Montir|Standard|Minimal|Ptc|Cordis)$/.test(t)) {
+      nodes[i].click();
+      window.__dshOpened = t;
+      return;
+    }
+  }
+  window.__dshOpened = 'no preset trigger found';
+})();`)
+			})
+			time.Sleep(1200 * time.Millisecond)
 			a.w.Dispatch(func() {
 				a.w.Eval(`(function(){
   var root = document.querySelector('#root, #app, [data-dsh-root], main');
@@ -335,8 +386,10 @@ func (a *app) scheduleProbe() {
     stylesheets: document.styleSheets.length,
     scripts: document.scripts.length,
     bodyText: (document.body ? (document.body.innerText || document.body.textContent || '') : '').replace(/\s+/g, ' ').trim().slice(0, 500),
-    nav: window.__dshNav || '',
     presetOptions: (function(){
+      // Which agent presets the picker offers. The names come from the profile's
+      // roster, so this is how the test proves the desktop window sees the same
+      // presets as the CLI.
       var names = ['Montir','Standard','Ptc','Minimal','Cordis'];
       var seen = [];
       var nodes = document.querySelectorAll('button, [role="option"], [role="menuitem"], li, span, div');
@@ -347,6 +400,88 @@ func (a *app) scheduleProbe() {
         if (names.indexOf(t) !== -1 && seen.indexOf(t) === -1) seen.push(t);
       }
       return seen;
+    })(),
+    nav: window.__dshNav || '',
+    theme: (function(){
+      // The theme tokens are not resolvable from :root, so sample what the
+      // browser actually painted instead: aggregate every element's background
+      // by painted area and keep the dominant colours.
+      var area = {}, borders = {}, texts = {}, nodes = document.querySelectorAll('*');
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i], r = el.getBoundingClientRect();
+        var px = Math.max(0, r.width) * Math.max(0, r.height);
+        var cs = getComputedStyle(el);
+        var bg = cs.backgroundColor;
+        if (bg && bg !== 'rgba(0, 0, 0, 0)' && px > 0) area[bg] = (area[bg] || 0) + px;
+        var bw = parseFloat(cs.borderTopWidth) || 0;
+        if (bw > 0 && px > 0) {
+          var bc = cs.borderTopColor;
+          if (bc && bc !== 'rgba(0, 0, 0, 0)') borders[bc] = (borders[bc] || 0) + r.width;
+        }
+        if (el.children.length === 0 && (el.textContent || '').trim()) {
+          var col = cs.color;
+          if (col) texts[col] = (texts[col] || 0) + 1;
+        }
+      }
+      function top(m, n) {
+        return Object.keys(m).sort(function(a, b) { return m[b] - m[a]; }).slice(0, n)
+          .map(function(k) { return [k, Math.round(m[k])]; });
+      }
+      var cs2 = getComputedStyle(document.body);
+      return {
+        htmlBg: getComputedStyle(document.documentElement).backgroundColor,
+        bodyBg: cs2.backgroundColor,
+        bodyColor: cs2.color,
+        backgrounds: top(area, 8),
+        borders: top(borders, 5),
+        textColors: top(texts, 5)
+      };
+    })(),
+    diag: (function(){
+      function findLeaf(text) {
+        var all = document.querySelectorAll('*');
+        for (var i = 0; i < all.length; i++) {
+          if (all[i].children.length === 0 && (all[i].textContent || '').trim() === text) return all[i];
+        }
+        return null;
+      }
+      var out = { supportsBackdrop: CSS.supports('backdrop-filter','blur(40px)'), opened: window.__dshOpened || '' };
+      var menus = [], cands = document.querySelectorAll('[role="menu"],[role="listbox"],[class*="material"],[class*="surface"],[class*="Surface"]');
+      for (var mi = 0; mi < cands.length && menus.length < 5; mi++) {
+        var el = cands[mi], cs3 = getComputedStyle(el), rr = el.getBoundingClientRect();
+        if (rr.width < 40 || rr.height < 20) continue;
+        var txt = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+        menus.push({ tag: el.tagName, cls: String(el.className || '').slice(0, 46), role: el.getAttribute('role') || '',
+                     bg: cs3.backgroundColor, bf: cs3.backdropFilter, color: cs3.color, z: cs3.zIndex,
+                     w: Math.round(rr.width), h: Math.round(rr.height), text: txt });
+      }
+      out.menus = menus;
+      // The readability fix is about the menu's *material* layer: the element
+      // that carries the fill and the blur. Report its alpha explicitly so the
+      // smoke test can assert the surface is fully opaque.
+      var mat = document.querySelector('[class*="material"]');
+      if (mat) {
+        var mcs = getComputedStyle(mat);
+        var m = /rgba?\(([^)]+)\)/.exec(mcs.backgroundColor);
+        var parts = m ? m[1].split(',').map(function(x){ return parseFloat(x); }) : [];
+        out.menuMaterial = {
+          cls: String(mat.className || '').slice(0, 44),
+          bg: mcs.backgroundColor,
+          alpha: parts.length === 4 ? parts[3] : (parts.length === 3 ? 1 : null),
+          backdropFilter: mcs.backdropFilter
+        };
+      } else {
+        out.menuMaterial = null;
+      }
+      var cs2 = getComputedStyle(document.body);
+      out.tokens = {
+        menuFill: cs2.getPropertyValue('--dsw-menu-surface-fill').trim(),
+        menuBf: cs2.getPropertyValue('--dsw-menu-backdrop-filter').trim(),
+        overlay: cs2.getPropertyValue('--dsw-alias-bg-overlay').trim(),
+        layer1: cs2.getPropertyValue('--dsw-alias-bg-layer-1').trim(),
+        base: cs2.getPropertyValue('--dsw-alias-bg-base').trim()
+      };
+      return out;
     })(),
     errors: (window.__dshErrors || []).slice(0, 10)
   };
@@ -363,17 +498,19 @@ func (a *app) printSelfTest() int {
 		return 1
 	}
 	var got struct {
-		URL           string   `json:"url"`
-		Title         string   `json:"title"`
-		Ready         string   `json:"readyState"`
-		HasRoot       bool     `json:"hasRoot"`
-		Buttons       int      `json:"buttons"`
-		BodyText      string   `json:"bodyText"`
-		PresetOptions []string `json:"presetOptions"`
-		Nav           string   `json:"nav"`
-		Errors        []string `json:"errors"`
-		RootKids      int      `json:"rootChildren"`
-		StyleShee     int      `json:"stylesheets"`
+		URL           string         `json:"url"`
+		Title         string         `json:"title"`
+		Ready         string         `json:"readyState"`
+		HasRoot       bool           `json:"hasRoot"`
+		Buttons       int            `json:"buttons"`
+		BodyText      string         `json:"bodyText"`
+		PresetOptions []string       `json:"presetOptions"`
+		Nav           string         `json:"nav"`
+		Diag          map[string]any `json:"diag"`
+		Theme         map[string]any `json:"theme"`
+		Errors        []string       `json:"errors"`
+		RootKids      int            `json:"rootChildren"`
+		StyleShee     int            `json:"stylesheets"`
 	}
 	if err := json.Unmarshal([]byte(a.report), &got); err != nil {
 		fmt.Printf("{\"ok\":false,\"reason\":\"unreadable probe payload\",\"raw\":%q}\n", a.report)
@@ -392,6 +529,9 @@ func (a *app) printSelfTest() int {
 		"bodyText":      got.BodyText,
 		"presetOptions": got.PresetOptions,
 		"nav":           got.Nav,
+		"diag":          got.Diag,
+		"early":         a.early,
+		"theme":         got.Theme,
 		"pageErrors":    got.Errors,
 		"hostLogTail":   strings.TrimSpace(a.log.String()),
 		"profile":       a.cfg.profile,
@@ -670,40 +810,102 @@ func (t *tail) String() string {
 // pages
 // ---------------------------------------------------------------------------
 
+// pageStyle dresses the boot and error screens in the client's own palette so the
+// window does not flash a different colour before the app paints. These are the
+// values the running client actually paints, measured from the live document
+// rather than guessed:
+//
+//	base background   rgb(21, 21, 23)     #151517
+//	raised surface    rgb(27, 27, 28)     #1b1b1c
+//	stronger border   rgb(44, 44, 46)     #2c2c2e
+//	primary label     rgb(249, 250, 251)  #f9fafb
+//	secondary label   rgb(173, 178, 184)  #adb2b8
+//	tertiary label    rgb(129, 133, 140)  #81858c
+//
+// The accent stays DeepSeek blue. The client's theme is its own setting rather
+// than the desktop's, so these match the dark theme it ships with.
 const pageStyle = `
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  html, body { height: 100%%; margin: 0; }
+  html, body { height: 100%%; margin: 0; background: #151517; }
   body {
     display: flex; align-items: center; justify-content: center;
-    background: #0b0d10; color: #e6e8eb;
+    background: #151517; color: #f9fafb;
     font: 14px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     -webkit-user-select: none; user-select: none;
   }
   .card { width: min(560px, 84vw); text-align: center; }
   h1 { font-size: 17px; font-weight: 600; margin: 0 0 6px; letter-spacing: .01em; }
-  p { margin: 0; color: #8b929c; }
+  p { margin: 0; color: #adb2b8; }
+  strong { color: #f9fafb; font-weight: 600; }
   .spinner {
     width: 26px; height: 26px; margin: 0 auto 20px;
-    border: 2px solid #24282e; border-top-color: #4d6bfe; border-radius: 50%%;
+    border: 2px solid #2c2c2e; border-top-color: #4d6bfe; border-radius: 50%%;
     animation: spin .8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .err { border-top-color: #ff6b6b; animation: none; border-color: #3a2020; border-top-color: #ff6b6b; }
+  .err { border-color: #2c2c2e; border-top-color: #e5484d; animation: none; }
   pre {
     margin: 20px 0 0; padding: 14px; max-height: 34vh; overflow: auto; text-align: left;
-    background: #14171b; border: 1px solid #23272d; border-radius: 8px;
+    background: #1b1b1c; border: 1px solid #2c2c2e; border-radius: 8px;
     font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #9aa1ab; white-space: pre-wrap; word-break: break-word;
+    color: #adb2b8; white-space: pre-wrap; word-break: break-word;
     -webkit-user-select: text; user-select: text;
   }
-  .hint { margin-top: 18px; font-size: 12.5px; color: #6b727c; }
-  code { background: #14171b; border: 1px solid #23272d; border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+  .hint { margin-top: 18px; font-size: 12.5px; color: #81858c; }
+  code { background: #1b1b1c; border: 1px solid #2c2c2e; border-radius: 4px; padding: 1px 5px; font-size: 12px; color: #adb2b8; }
 `
+
+// pageHead carries the colour-scheme hint that stops WebKit painting a white
+// canvas in the moment before the stylesheet above applies.
+const pageHead = `<meta charset="utf-8"><meta name="color-scheme" content="dark">`
+
+// readableSurfacesCSS makes the client's translucent menus opaque.
+//
+// The client styles menu surfaces as `--dsw-menu-surface-fill: #43454a73` -- 45%
+// opaque -- and relies on `backdrop-filter: blur(40px)` for contrast. That works
+// on Chromium, where the blur composites the page behind the menu. On the
+// WebKitGTK path this app uses, the blur does not composite, so the menu renders
+// as a see-through panel and its labels are unreadable against the content
+// underneath.
+//
+// The replacement is that same fill composited over the base background:
+//
+//	#43454a at 45% over #151517  ->  #2a2b2e
+//
+// which is what the menu is meant to look like once the blur has done its work.
+// The fill no longer depends on the blur, so the blur is switched off with it.
+const readableSurfacesCSS = `
+:root, body {
+  --dsw-menu-surface-fill: #2a2b2e !important;
+  --dsw-menu-backdrop-filter: none !important;
+}
+`
+
+// readableSurfacesJS returns the script that installs readableSurfacesCSS into
+// the document. It runs from Init, so it is in place before the client's own
+// stylesheet and survives the navigation from the boot screen to the app.
+func readableSurfacesJS(cfg config) string {
+	if !cfg.opaqueMenus {
+		return ""
+	}
+	return `  (function(){
+    var css = ` + strconv.Quote(readableSurfacesCSS) + `;
+    function install() {
+      if (document.getElementById('dsh-desktop-readability')) return;
+      var el = document.createElement('style');
+      el.id = 'dsh-desktop-readability';
+      el.textContent = css;
+      (document.head || document.documentElement).appendChild(el);
+    }
+    if (document.head) install();
+    else document.addEventListener('DOMContentLoaded', install);
+  })();`
+}
 
 func loadingPage(cfg config) string {
 	return `<!doctype html>
-<html><head><meta charset="utf-8"><title>` + appName + `</title>
+<html><head>` + pageHead + `<title>` + appName + `</title>
 <style>` + fmt.Sprintf(pageStyle) + `</style></head>
 <body><div class="card">
   <div class="spinner"></div>
@@ -724,7 +926,7 @@ func errorPage(title, detail, output string) string {
 	body += `<div class="hint">Check that the CLI runs: <code>dsh web</code>. Override the binary with <code>--dsh &lt;path&gt;</code>.</div>
 </div>`
 	return `<!doctype html>
-<html><head><meta charset="utf-8"><title>` + appName + ` — error</title>
+<html><head>` + pageHead + `<title>` + appName + ` — error</title>
 <style>` + fmt.Sprintf(pageStyle) + `</style></head>
 <body>` + body + `</body></html>`
 }

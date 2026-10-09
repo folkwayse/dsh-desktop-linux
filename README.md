@@ -77,6 +77,7 @@ dsh-desktop [options]
   -dsh string       path to the dsh executable
   -no-dmabuf        disable WebKit's DMA-BUF renderer (default true)
   -safe-render      additionally disable WebKit compositing mode
+  -opaque-menus     make the client's translucent menus opaque (default true)
   -debug            enable the WebKit inspector
   -verbose          echo the host's output to stderr
   -selftest 25s     load, inspect the rendered page, print JSON, exit
@@ -111,6 +112,24 @@ If you keep presets in another profile, pass it:
 ```sh
 dsh-desktop -profile work
 ```
+
+### Unreadable menus
+
+The client styles menu surfaces as `--dsw-menu-surface-fill: #43454a73` — 45%
+opaque — and leans on `backdrop-filter: blur(40px)` for contrast. That works on
+Chromium, where the blur composites the page behind the menu. On this render path
+the blur does not composite, so the menu draws as a see-through panel and its
+labels are hard to read against the content underneath.
+
+`-opaque-menus` (on by default) replaces the fill with the same colour made
+opaque, which is what the menu looks like once the blur has done its work:
+
+```
+#43454a at 45% over the #151517 base  ->  #2a2b2e
+```
+
+The blur is switched off with it, since nothing depends on it any more. Pass
+`-opaque-menus=false` to keep the upstream translucency.
 
 ### Blank window?
 

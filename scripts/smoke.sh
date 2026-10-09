@@ -53,6 +53,10 @@ except Exception as exc:
     print(f"  \033[31mFAIL\033[0m unreadable report: {exc}")
     sys.exit(1)
 
+diag = r.get("diag") or {}
+material = diag.get("menuMaterial") or {}
+alpha = material.get("alpha")
+
 checks = [
     ("window loaded a page",        r.get("readyState") == "complete"),
     ("app root element rendered",   bool(r.get("hasRoot"))),
@@ -68,6 +72,13 @@ checks = [
         "already on the empty-session view",
     )),
     ("montir preset on the roster", "Montir" in (r.get("presetOptions") or [])),
+    ("agent preset menu opened",    bool(diag.get("opened")) and
+                                    diag.get("opened") != "no preset trigger found"),
+    # The upstream menu fill is 45% opaque and depends on a backdrop blur that
+    # does not composite on this render path, which leaves the labels unreadable.
+    # The app replaces it with the same colour made opaque; this asserts that
+    # actually took effect in the live document.
+    ("menu surface is opaque",      alpha == 1),
 ]
 failed = False
 for label, ok in checks:
@@ -79,6 +90,7 @@ print(f"       readyState   : {r.get('readyState')}")
 print(f"       buttons      : {r.get('buttons')}   stylesheets: {r.get('stylesheets')}")
 print(f"       nav          : {r.get('nav')}")
 print(f"       presets      : {r.get('presetOptions')}")
+print(f"       menu fill    : {material.get('bg')}  alpha={alpha}  blur={material.get('backdropFilter')}")
 print(f"       pageErrors   : {r.get('pageErrors')}")
 body = (r.get("bodyText") or "").strip()
 if body:
