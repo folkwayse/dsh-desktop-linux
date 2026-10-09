@@ -1,0 +1,9 @@
+# build output
+/dist/
+
+# editor and OS noise
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/

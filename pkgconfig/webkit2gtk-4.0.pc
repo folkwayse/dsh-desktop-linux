@@ -1,0 +1,7 @@
+# Compatibility shim: the bundled webview C library asks pkg-config for
+# webkit2gtk-4.0, which modern Ubuntu no longer ships. 4.1 is API-compatible for
+# everything webview.h uses, so this file forwards to it.
+Name: webkit2gtk-4.0
+Description: webkit2gtk-4.0 compatibility shim over webkit2gtk-4.1
+Version: 2.52.6
+Requires: webkit2gtk-4.1

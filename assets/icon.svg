@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- DeepSeek Harness: one spine (the harness) with three bound plugins.
+       Solid fills only: librsvg renders gradient *strokes* inconsistently, and
+       this icon must survive rasterization at 16px. -->
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="#0f1218"/>
+  <rect x="1.5" y="1.5" width="253" height="253" rx="54.5" fill="none"
+        stroke="#ffffff" stroke-opacity="0.08" stroke-width="3"/>
+
+  <!-- spine -->
+  <rect x="66" y="58" width="16" height="140" rx="8" fill="#4d6bfe"/>
+  <!-- links -->
+  <rect x="74" y="70"  width="86" height="12" rx="6" fill="#4d6bfe"/>
+  <rect x="74" y="122" width="86" height="12" rx="6" fill="#4d6bfe"/>
+  <rect x="74" y="174" width="86" height="12" rx="6" fill="#4d6bfe"/>
+  <!-- bound nodes -->
+  <circle cx="174" cy="76"  r="20" fill="#4d6bfe"/>
+  <circle cx="174" cy="128" r="20" fill="#4d6bfe"/>
+  <circle cx="174" cy="180" r="20" fill="#4d6bfe"/>
+  <circle cx="174" cy="76"  r="7" fill="#0f1218"/>
+  <circle cx="174" cy="128" r="7" fill="#0f1218"/>
+  <circle cx="174" cy="180" r="7" fill="#0f1218"/>
+</svg>
