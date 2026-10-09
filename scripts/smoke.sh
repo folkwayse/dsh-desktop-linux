@@ -59,6 +59,14 @@ checks = [
     ("client UI is interactive",    r.get("buttons", 0) > 5),
     ("stylesheet bundle applied",   r.get("stylesheets", 0) > 10),
     ("no page-level errors",        not r.get("pageErrors")),
+    # The client restores the route it was last on, so the probe must have ended
+    # up on the empty-session view for the preset check below to mean anything.
+    # Asserting this is what stops the preset check from silently passing or
+    # failing depending on where the user left the app.
+    ("reached the empty-session view", r.get("nav") in (
+        "clicked New Session",
+        "already on the empty-session view",
+    )),
     ("montir preset on the roster", "Montir" in (r.get("presetOptions") or [])),
 ]
 failed = False
@@ -69,6 +77,7 @@ for label, ok in checks:
 print(f"       title        : {r.get('title')}")
 print(f"       readyState   : {r.get('readyState')}")
 print(f"       buttons      : {r.get('buttons')}   stylesheets: {r.get('stylesheets')}")
+print(f"       nav          : {r.get('nav')}")
 print(f"       presets      : {r.get('presetOptions')}")
 print(f"       pageErrors   : {r.get('pageErrors')}")
 body = (r.get("bodyText") or "").strip()

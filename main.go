@@ -282,9 +282,18 @@ func run(cfg config) int {
 	return 0
 }
 
+// newSessionSettle is how long the client gets to swap from whatever view it
+// restored to the empty-session view that carries the agent-preset picker.
+const newSessionSettle = 3 * time.Second
+
 // scheduleProbe inspects the rendered document once, after the app has had time
 // to boot. It is the only way to prove WebKit actually executed the client,
 // which no amount of "the window exists" checking can show.
+//
+// The client restores the route it was last on, which may be any settings page.
+// The agent-preset picker only exists on the empty-session view, so the probe
+// navigates there first: otherwise the preset check would pass or fail depending
+// on where the user happened to leave the app.
 func (a *app) scheduleProbe() {
 	if a.cfg.selftest <= 0 {
 		return
@@ -292,6 +301,27 @@ func (a *app) scheduleProbe() {
 	a.probeOnce.Do(func() {
 		go func() {
 			time.Sleep(a.cfg.selftest)
+			a.w.Dispatch(func() {
+				a.w.Eval(`(function(){
+  // The empty-session view is the only one with the agent-preset picker. It is
+  // identifiable by its composer placeholder, so if that is already on screen
+  // the route was restored correctly and there is nothing to click.
+  if (document.body && document.body.innerText.indexOf('Describe what you want to build') !== -1) {
+    window.__dshNav = 'already on the empty-session view';
+    return;
+  }
+  var nodes = document.querySelectorAll('button, a, [role="button"], [role="menuitem"], [role="tab"]');
+  for (var i = 0; i < nodes.length; i++) {
+    if ((nodes[i].textContent || '').trim() === 'New Session') {
+      nodes[i].click();
+      window.__dshNav = 'clicked New Session';
+      return;
+    }
+  }
+  window.__dshNav = 'no New Session control found';
+})();`)
+			})
+			time.Sleep(newSessionSettle)
 			a.w.Dispatch(func() {
 				a.w.Eval(`(function(){
   var root = document.querySelector('#root, #app, [data-dsh-root], main');
@@ -305,6 +335,7 @@ func (a *app) scheduleProbe() {
     stylesheets: document.styleSheets.length,
     scripts: document.scripts.length,
     bodyText: (document.body ? (document.body.innerText || document.body.textContent || '') : '').replace(/\s+/g, ' ').trim().slice(0, 500),
+    nav: window.__dshNav || '',
     presetOptions: (function(){
       var names = ['Montir','Standard','Ptc','Minimal','Cordis'];
       var seen = [];
@@ -339,6 +370,7 @@ func (a *app) printSelfTest() int {
 		Buttons       int      `json:"buttons"`
 		BodyText      string   `json:"bodyText"`
 		PresetOptions []string `json:"presetOptions"`
+		Nav           string   `json:"nav"`
 		Errors        []string `json:"errors"`
 		RootKids      int      `json:"rootChildren"`
 		StyleShee     int      `json:"stylesheets"`
@@ -359,6 +391,7 @@ func (a *app) printSelfTest() int {
 		"stylesheets":   got.StyleShee,
 		"bodyText":      got.BodyText,
 		"presetOptions": got.PresetOptions,
+		"nav":           got.Nav,
 		"pageErrors":    got.Errors,
 		"hostLogTail":   strings.TrimSpace(a.log.String()),
 		"profile":       a.cfg.profile,
