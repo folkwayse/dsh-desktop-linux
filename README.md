@@ -80,6 +80,9 @@ dsh-desktop [options]
   -opaque-menus     make the client's translucent menus opaque (default true)
   -debug            enable the WebKit inspector
   -verbose          echo the host's output to stderr
+  -check-update     print the newest release and whether it is newer, then exit
+  -update           download the newest release, replace this binary, and exit
+  -update-check     check for a newer release after boot and show a banner (default true)
   -selftest 25s     load, inspect the rendered page, print JSON, exit
   -version          print the version
 ```
@@ -145,6 +148,33 @@ dsh-desktop -no-dmabuf=false
 Both flags only set environment variables, and never override a value you set
 yourself — so `WEBKIT_DISABLE_DMABUF_RENDERER=0 dsh-desktop` wins over the default.
 
+## Updates
+
+The shell updates itself from this repository's GitHub releases:
+
+```sh
+dsh-desktop -check-update   # dsh-desktop 0.1.3 (latest 0.1.4)
+                            # Update available: 0.1.4 — install it with: dsh-desktop -update
+dsh-desktop -update         # download, verify the archive, replace the binary
+```
+
+Both are ordinary commands: no window, no profile, no single-instance lock, so an
+update runs while a window is open. The replacement is a `rename` of the new
+binary over the old path — the only mutation — so a failed download or a
+truncated archive leaves the working install untouched. The binary it replaced
+is kept beside it as `dsh-desktop.backup`; restore it by hand if a release
+misbehaves.
+
+On launch the app also checks in the background (4 s timeout, once) and, when a
+newer release exists, shows a dismissible banner in the window and a desktop
+notification. **It never installs anything by itself** — a self-replacing binary
+is not something to do behind the user's back. Disable even the check with
+`-update-check=false` or `DSH_DESKTOP_NO_UPDATE_CHECK=1`.
+
+This updates the *shell*. The `dsh` CLI and the plugins in your profile are a
+separate stack with its own release cadence; the `dsh-autoupdate` plugin reports
+and applies those.
+
 ## Develop
 
 ```sh
@@ -194,7 +224,9 @@ phantom orphans.
 | Path | Purpose |
 |---|---|
 | `main.go` | everything: flags, host supervision, WebKit window, self-test |
+| `update.go` | the self-update engine: release feed, version compare, atomic install, banner |
 | `main_test.go` | unit tests for port selection and the URL pattern |
+| `update_test.go` | unit tests for version compare, asset pick, and a real download-and-replace |
 | `pkgconfig/webkit2gtk-4.0.pc` | forwards the legacy 4.0 pkg-config name to 4.1 |
 | `scripts/install.sh` | build + per-user install (and `--uninstall`) |
 | `scripts/smoke.sh` | the end-to-end test |
@@ -215,7 +247,8 @@ library. `make` and `install.sh` put that directory on `PKG_CONFIG_PATH`.
   wired for macOS/Windows here; those need the `webview_go` Cocoa/WebView2 paths.
 - **No tray icon.** Closing the window quits the app and stops the host. The
   Electron shells keep a tray instead.
-- **No auto-update.** Re-run `scripts/install.sh` after a rebuild.
+- **Updates only what it ships.** The shell replaces its own binary; the `dsh`
+  CLI and the profile's plugins are updated by the `dsh-autoupdate` plugin.
 - **`dsh` must resolve.** If the CLI is not on `PATH`, pass `--dsh <path>` or set
   `DSH_BIN`.
 - **Single instance per profile.** A second launch refuses to start while one

@@ -77,6 +77,12 @@ type config struct {
 	opaqueMenus bool
 	verbose     bool
 	selftest    time.Duration
+
+	// updateCheck is the boot-time check for a newer release. The two
+	// commands below run it in the foreground instead, and exit.
+	updateCheck bool
+	checkUpdate bool
+	update      bool
 }
 
 func main() {
@@ -87,6 +93,12 @@ func main() {
 		}
 		fmt.Fprintln(os.Stderr, "dsh-desktop:", err)
 		os.Exit(2)
+	}
+
+	// -check-update and -update are ordinary commands: no window, no profile,
+	// no single-instance lock, so an update works while a window is open.
+	if cfg.checkUpdate || cfg.update {
+		os.Exit(runUpdateCommand(cfg))
 	}
 
 	// WebKit reads these once, at engine init, so they must be set before the
@@ -136,10 +148,16 @@ func parseFlags(args []string) (config, error) {
 	fs.BoolVar(&cfg.safeRender, "safe-render", false, "additionally disable WebKit compositing mode, for drivers that still render blank or garbled")
 	fs.BoolVar(&cfg.verbose, "verbose", false, "echo the host's output to stderr")
 	fs.DurationVar(&cfg.selftest, "selftest", 0, "load the app, inspect the rendered page, print a JSON report and exit (e.g. 20s)")
+	fs.BoolVar(&cfg.updateCheck, "update-check", os.Getenv(updateEnvOpt) == "", "check GitHub for a newer release after boot and show a banner when there is one (env "+updateEnvOpt+"=1 disables it)")
+	fs.BoolVar(&cfg.checkUpdate, "check-update", false, "print the newest release and whether it is newer than this build, then exit")
+	fs.BoolVar(&cfg.update, "update", false, "download the newest release and replace this binary, then exit (the previous binary is kept as dsh-desktop.backup)")
 	fs.BoolVar(&showVersion, "version", false, "print the version and exit")
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
+	}
+	if cfg.checkUpdate && cfg.update {
+		return cfg, errors.New("-check-update and -update are separate commands; -update already reports what it installs")
 	}
 	if showVersion {
 		fmt.Printf("dsh-desktop %s\n", version)
@@ -219,6 +237,11 @@ type app struct {
 	probe     chan string
 	report    string
 	early     map[string]any // first-paint colour sample, for the self-test
+
+	// notice is the banner text for a newer release, empty until the boot-time
+	// check finds one. It is read from the page through a binding, so it is
+	// stored atomically rather than behind the mutex the host uses.
+	notice atomic.Value
 }
 
 func run(cfg config) int {
@@ -249,7 +272,18 @@ func run(cfg config) int {
     window.__dshErrors.push('unhandled rejection: ' + String(e && e.reason));
   });
 ` + readableSurfacesJS(cfg) + `
+` + updateBannerJS() + `
 })();`)
+
+	// The banner renders itself in every document and asks Go what to say, so
+	// the answer can arrive long after the page has loaded.
+	if err := w.Bind("__dshUpdateNotice", a.updateNotice); err != nil {
+		fmt.Fprintln(os.Stderr, "dsh-desktop: cannot bind the update banner:", err)
+	}
+
+	if cfg.updateCheck && cfg.selftest == 0 {
+		go a.checkForUpdateOnBoot()
+	}
 
 	if cfg.selftest > 0 {
 		// The early sample is reported through its own binding because navigating

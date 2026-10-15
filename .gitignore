@@ -7,3 +7,7 @@
 .DS_Store
 .idea/
 .vscode/
+
+# local go build/test scratch
+/.gocache/
+/.gotmp/
