@@ -65,10 +65,14 @@ var version = "0.1.0"
 var urlPattern = regexp.MustCompile(`https?://(?:127\.0\.0\.1|localhost):\d+/\?token=[A-Za-z0-9._~-]+`)
 
 type config struct {
-	profile     string
-	port        int
-	width       int
-	height      int
+	profile string
+	port    int
+	width   int
+	height  int
+
+	// sizeSet records that -width or -height was given, which turns the
+	// monitor-relative sizing off: an explicit size is an instruction.
+	sizeSet     bool
 	dshBin      string
 	url         string
 	debug       bool
@@ -138,7 +142,7 @@ func parseFlags(args []string) (config, error) {
 	}
 	fs.StringVar(&cfg.profile, "profile", "web", "Harness profile to boot (the profile that owns your agent presets)")
 	fs.IntVar(&cfg.port, "port", defaultPort, "loopback port for the host; if it is taken the app moves up to the next free one (0 lets the OS choose)")
-	fs.IntVar(&cfg.width, "width", 1280, "initial window width")
+	fs.IntVar(&cfg.width, "width", 1280, "initial window width; setting it or -height turns off the monitor-relative sizing and uses these instead")
 	fs.IntVar(&cfg.height, "height", 840, "initial window height")
 	fs.StringVar(&cfg.dshBin, "dsh", "", "path to the dsh executable (default: $DSH_BIN, then PATH, then node + installed CLI)")
 	fs.StringVar(&cfg.url, "url", "", "load this URL directly instead of booting a host (testing / attaching)")
@@ -156,6 +160,11 @@ func parseFlags(args []string) (config, error) {
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "width" || f.Name == "height" {
+			cfg.sizeSet = true
+		}
+	})
 	if cfg.checkUpdate && cfg.update {
 		return cfg, errors.New("-check-update and -update are separate commands; -update already reports what it installs")
 	}
@@ -249,10 +258,14 @@ func run(cfg config) int {
 	defer w.Destroy()
 
 	w.SetTitle(appName)
-	w.SetSize(cfg.width, cfg.height, webview.HintNone)
 
 	a := &app{cfg: cfg, w: w, log: newTail(8 << 10), probe: make(chan string, 1)}
 	a.alive.Store(true)
+
+	// The window opens as a share of the monitor rather than a fixed size, and
+	// centred in its work area. An explicit -width/-height overrides that.
+	width, height := a.windowSize()
+	a.applyStartGeometry(width, height)
 
 	// Schedule the probe before the first paint. It fires once, `selftest` after
 	// startup, so it samples whatever is on screen by then: the boot screen when

@@ -73,7 +73,8 @@ dsh-desktop [options]
 
   -profile string   Harness profile to boot (default "web")
   -port int         loopback port for the host (default 21777)
-  -width, -height   initial window size (default 1280x840)
+  -width, -height   initial window size (default: a share of the monitor;
+                    setting either flag pins the size instead)
   -dsh string       path to the dsh executable
   -no-dmabuf        disable WebKit's DMA-BUF renderer (default true)
   -safe-render      additionally disable WebKit compositing mode
@@ -86,6 +87,35 @@ dsh-desktop [options]
   -selftest 25s     load, inspect the rendered page, print JSON, exit
   -version          print the version
 ```
+
+### The window size
+
+A fixed size is either cramped or overwhelming depending on the screen, and it
+lands wherever the window manager puts it. So the window opens at **78% x 88% of
+the primary monitor** — two-thirds of the area — and is centred in the **work
+area**, the part of the screen the desktop is not using for panels:
+
+```
+1920x1080 screen                            1498 x 950
+2560x1440 screen                            1997 x 1267
+ 800x600 screen                             720 x 528   minimum width wins
+1920x1080, 200 px of panels                 1498 x 880  capped by the work area
+ 960x540 (a 1920x1080 screen at 200% scaling) 749 x 520  both minimums win
+```
+
+The minimum is applied before the work-area cap. The other order would let a
+tiny screen produce a window larger than the space it has to live in.
+
+Both numbers come from GTK in application pixels, the same unit it sizes and
+moves windows in, so a HiDPI screen needs no arithmetic: GTK already reports a
+1920x1080 screen at 200% scaling as 960x540.
+
+`-width` and `-height` turn this off: an explicit size is an instruction, so
+the window keeps it. Position is still centred, and on Wayland the compositor
+places the window itself — moving a window by request is an X11 privilege.
+
+If the display cannot report its geometry — a headless run — the flags'
+defaults of 1280x840 are used and nothing else changes.
 
 ### The port
 
