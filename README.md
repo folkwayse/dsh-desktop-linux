@@ -183,7 +183,7 @@ make run       # build and launch
 make test      # unit tests + full smoke test
 make unit      # unit tests only (no display, no dsh needed)
 make vet       # gofmt + go vet
-make icons     # re-render assets/icons from assets/icon.svg
+make icons     # re-render assets/icons from assets/icon.png
 make release   # package dist/dsh-desktop-<version>-linux-x86_64.tar.gz
 ```
 
@@ -230,8 +230,8 @@ phantom orphans.
 | `pkgconfig/webkit2gtk-4.0.pc` | forwards the legacy 4.0 pkg-config name to 4.1 |
 | `scripts/install.sh` | build + per-user install (and `--uninstall`) |
 | `scripts/smoke.sh` | the end-to-end test |
-| `scripts/render-icons.py` | rasterizes `assets/icon.svg` via librsvg |
-| `assets/icon.svg` | icon source — one spine (the harness), three bound plugins |
+| `scripts/render-icons.py` | rasterizes `assets/icon.png` into `assets/icons/` |
+| `assets/icon.png` | icon master, 512 px; the sizes in `assets/icons/` are rendered from it |
 
 ### Why the pkg-config shim
 

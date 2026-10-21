@@ -11,3 +11,9 @@
 # local go build/test scratch
 /.gocache/
 /.gotmp/
+
+# python bytecode from the icon renderer
+__pycache__/
+
+# a bare `go build .` in the repo root drops the binary here
+/dsh-desktop-linux

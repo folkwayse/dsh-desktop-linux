@@ -16,6 +16,8 @@ build:
 run: build
 	./$(BIN)
 
+# Icons are rendered from assets/icon.png (or assets/icon.svg when a vector
+# is present) into the PNG sizes the hicolor theme wants.
 icons:
 	python3 scripts/render-icons.py
 
