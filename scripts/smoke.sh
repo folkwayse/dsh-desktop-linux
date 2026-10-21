@@ -44,7 +44,7 @@ else
 fi
 
 python3 - "$REPORT" <<'PY'
-import json, sys
+import json, re, sys
 
 path = sys.argv[1]
 try:
@@ -56,6 +56,26 @@ except Exception as exc:
 diag = r.get("diag") or {}
 material = diag.get("menuMaterial") or {}
 alpha = material.get("alpha")
+menu = r.get("menu") or {}
+tokens = diag.get("tokens") or {}
+
+
+def luminance(colour):
+    """Relative luminance of an `rgb(r, g, b)` string, 0 (black) to 1 (white)."""
+    m = re.match(r"rgba?\(([^)]+)\)", colour or "")
+    if not m:
+        return None
+    parts = [float(x) for x in m.group(1).split(",")[:3]]
+    chan = []
+    for c in parts:
+        c = c / 255.0
+        chan.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2]
+
+
+menu_lum = luminance(menu.get("menuBg"))
+label_lum = luminance(menu.get("itemColor"))
+dark = bool(menu.get("dark"))
 
 checks = [
     ("window loaded a page",        r.get("readyState") == "complete"),
@@ -71,7 +91,10 @@ checks = [
         "clicked New Session",
         "already on the empty-session view",
     )),
-    ("montir preset on the roster", "Montir" in (r.get("presetOptions") or [])),
+    # The preset roster belongs to the profile, not to the app, so the check is
+    # that the picker offers the profile's presets -- not that it offers one
+    # particular name.
+    ("agent presets on the roster", len(r.get("presetOptions") or []) > 0),
     ("agent preset menu opened",    bool(diag.get("opened")) and
                                     diag.get("opened") != "no preset trigger found"),
     # The upstream menu fill is 45% opaque and depends on a backdrop blur that
@@ -79,6 +102,18 @@ checks = [
     # The app replaces it with the same colour made opaque; this asserts that
     # actually took effect in the live document.
     ("menu surface is opaque",      alpha == 1),
+    # The workspace picker is the menu users open most, and the one that used
+    # to come out black on a light desktop.
+    ("workspace picker opened",     menu.get("opened") == "clicked"),
+    ("workspace menu is opaque",    menu.get("menuAlpha") == 1),
+    # The fill has to match the theme the client is in: a dark panel under
+    # light-theme labels is unreadable, which is the bug this replaces.
+    ("menu fill follows the theme",
+        (menu_lum is not None and label_lum is not None
+         and ((menu_lum > 0.5) == (label_lum < 0.5)))),
+    ("menu labels contrast with the surface",
+        (menu_lum is not None and label_lum is not None
+         and abs(menu_lum - label_lum) > 0.25)),
 ]
 failed = False
 for label, ok in checks:
@@ -91,7 +126,10 @@ print(f"       buttons      : {r.get('buttons')}   stylesheets: {r.get('styleshe
 print(f"       nav          : {r.get('nav')}")
 print(f"       presets      : {r.get('presetOptions')}")
 print(f"       menu fill    : {material.get('bg')}  alpha={alpha}  blur={material.get('backdropFilter')}")
+print(f"       theme        : {'dark' if dark else 'light'}  fill={tokens.get('menuFill')}  "
+      f"picker={menu.get('menuBg')}  label={menu.get('itemColor')}")
 print(f"       pageErrors   : {r.get('pageErrors')}")
+print(f"       resourceErrs : {r.get('resourceErrors')}")
 body = (r.get("bodyText") or "").strip()
 if body:
     print(f"       bodyText     : {body[:160]}")

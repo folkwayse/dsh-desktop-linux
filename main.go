@@ -64,6 +64,9 @@ var version = "0.1.0"
 //	dsh web: http://127.0.0.1:37907/?token=cQVcPsNLazo9whuwBREC7PlarY_4XQGkpyDvJYN2cws
 var urlPattern = regexp.MustCompile(`https?://(?:127\.0\.0\.1|localhost):\d+/\?token=[A-Za-z0-9._~-]+`)
 
+// The portal numbers its colour-scheme reply: <uint32 N>.
+var portalUint32 = regexp.MustCompile(`uint32\s+(\d+)`)
+
 type config struct {
 	profile     string
 	port        int
@@ -242,6 +245,10 @@ type app struct {
 	// check finds one. It is read from the page through a binding, so it is
 	// stored atomically rather than behind the mutex the host uses.
 	notice atomic.Value
+
+	// themeStop ends the desktop's colour-scheme listener. It is called when
+	// the window closes so the helper does not outlive the app.
+	themeStop atomic.Value // func()
 }
 
 func run(cfg config) int {
@@ -265,13 +272,23 @@ func run(cfg config) int {
 	// instead of just "the root element is missing".
 	w.Init(`(function(){
   window.__dshErrors = [];
+  window.__dshResourceErrors = [];
   window.addEventListener('error', function(e){
-    window.__dshErrors.push(String((e && (e.message || e.error)) || 'error'));
+    // A failed image or attachment is not a page error: it has no message and
+    // no source location, only a target element. Keep the two apart, or the
+    // report drowns in unrelated 404s.
+    if (e && e.target && e.target !== window && !e.message) {
+      window.__dshResourceErrors.push(String(e.target.tagName || 'resource'));
+      return;
+    }
+    var where = (e && e.filename) ? ' @ ' + e.filename + ':' + e.lineno : '';
+    window.__dshErrors.push(String((e && (e.message || e.error)) || 'error') + where);
   }, true);
   window.addEventListener('unhandledrejection', function(e){
     window.__dshErrors.push('unhandled rejection: ' + String(e && e.reason));
   });
-` + readableSurfacesJS(cfg) + `
+` + shellCSSJS(cfg) + `
+` + schemeFollowJS() + `
 ` + updateBannerJS() + `
 })();`)
 
@@ -311,6 +328,8 @@ func run(cfg config) int {
 		}
 	}
 
+	go a.watchSystemTheme()
+
 	if cfg.url != "" {
 		a.navigate(cfg.url)
 	} else {
@@ -327,6 +346,9 @@ func run(cfg config) int {
 	w.Run() // blocks until the window closes
 
 	a.alive.Store(false)
+	if stop, ok := a.themeStop.Load().(func()); ok && stop != nil {
+		stop()
+	}
 	a.stopHost()
 
 	if cfg.selftest > 0 {
@@ -375,13 +397,15 @@ func (a *app) scheduleProbe() {
   // The empty-session view is the only one with the agent-preset picker. It is
   // identifiable by its composer placeholder, so if that is already on screen
   // the route was restored correctly and there is nothing to click.
-  if (document.body && document.body.innerText.indexOf('Describe what you want to build') !== -1) {
+  var text = document.body ? (document.body.innerText || '') : '';
+  if (text.indexOf('Describe what you want to build') !== -1 || text.indexOf('\u63cf\u8ff0\u4f60\u60f3\u8981\u6784\u5efa\u7684\u5185\u5bb9') !== -1) {
     window.__dshNav = 'already on the empty-session view';
     return;
   }
   var nodes = document.querySelectorAll('button, a, [role="button"], [role="menuitem"], [role="tab"]');
   for (var i = 0; i < nodes.length; i++) {
-    if ((nodes[i].textContent || '').trim() === 'New Session') {
+    var t = (nodes[i].textContent || '').trim();
+    if (t === 'New Session' || t === '\u65b0\u4f1a\u8bdd') {
       nodes[i].click();
       window.__dshNav = 'clicked New Session';
       return;
@@ -391,15 +415,67 @@ func (a *app) scheduleProbe() {
 })();`)
 			})
 			time.Sleep(newSessionSettle)
-			// Open the agent-preset picker so the probe can inspect its surface.
+			// Open the workspace picker and measure the surface it paints. The
+			// menu fill is the thing this app has to get right: a translucent
+			// fill that does not composite leaves the labels unreadable, and a
+			// fill from the wrong theme leaves them dark on dark.
 			a.w.Dispatch(func() {
 				a.w.Eval(`(function(){
+  var nodes = document.querySelectorAll('button, [role="button"]');
+  for (var i = 0; i < nodes.length; i++) {
+    var label = nodes[i].getAttribute('aria-label') || '';
+    if (label.indexOf('\u9009\u62e9\u5de5\u4f5c\u533a') !== -1 || /select workspace/i.test(label)) {
+      nodes[i].click();
+      window.__dshPicker = 'clicked';
+      return;
+    }
+  }
+  window.__dshPicker = 'no workspace trigger found';
+})();`)
+			})
+			time.Sleep(1200 * time.Millisecond)
+			a.w.Dispatch(func() {
+				a.w.Eval(`(function(){
+  var out = { opened: window.__dshPicker || '' };
+  // The panel that carries the fill is the material layer inside the menu.
+  var panels = document.querySelectorAll('[role="menu"]');
+  for (var i = 0; i < panels.length; i++) {
+    var mat = panels[i].querySelector('[class*="material"]');
+    if (!mat) continue;
+    var cs = getComputedStyle(mat);
+    out.menuBg = cs.backgroundColor;
+    out.menuBlur = cs.backdropFilter;
+    var m = /rgba?\(([^)]+)\)/.exec(cs.backgroundColor);
+    var parts = m ? m[1].split(',').map(function (x) { return parseFloat(x); }) : [];
+    out.menuAlpha = parts.length === 4 ? parts[3] : (parts.length === 3 ? 1 : null);
+    var item = panels[i].querySelector('[role="menuitem"], button');
+    if (item) out.itemColor = getComputedStyle(item).color;
+    out.menuText = (panels[i].textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+    break;
+  }
+  out.dark = !!(document.body && document.body.hasAttribute('data-ds-dark-theme'));
+  // What the engine itself reports. The client paints from this, and it is
+  // what the desktop's colour scheme has to change for the app to follow.
+  out.prefersDark = matchMedia('(prefers-color-scheme: dark)').matches;
+  out.themeSource = document.documentElement.getAttribute('data-ds-theme-source');
+  window.__dshMenu = out;
+})();`)
+			})
+			// Open the agent-preset picker so the probe can inspect its surface.
+			// Close the workspace menu first, so the picker's own entries are
+			// the only ones on screen.
+			a.w.Dispatch(func() {
+				a.w.Eval(`(function(){
+  try {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  } catch (e) {}
   var nodes = document.querySelectorAll('button');
   for (var i = 0; i < nodes.length; i++) {
     var t = (nodes[i].textContent || '').trim();
-    if (/^(Montir|Standard|Minimal|Ptc|Cordis)$/.test(t)) {
+    var label = nodes[i].getAttribute('aria-label') || '';
+    if (/^(Montir|Standard|Minimal|Ptc|Cordis)$/.test(t) || t === '\u6807\u51c6\u6a21\u5f0f' || /Standard mode/i.test(label)) {
       nodes[i].click();
-      window.__dshOpened = t;
+      window.__dshOpened = t || label;
       return;
     }
   }
@@ -421,21 +497,35 @@ func (a *app) scheduleProbe() {
     scripts: document.scripts.length,
     bodyText: (document.body ? (document.body.innerText || document.body.textContent || '') : '').replace(/\s+/g, ' ').trim().slice(0, 500),
     presetOptions: (function(){
-      // Which agent presets the picker offers. The names come from the profile's
-      // roster, so this is how the test proves the desktop window sees the same
-      // presets as the CLI.
-      var names = ['Montir','Standard','Ptc','Minimal','Cordis'];
+      // Which agent presets the picker offers. The names come from the
+      // profile's roster, so this is how the test proves the desktop window
+      // sees the same presets as the CLI. They are read off the open picker
+      // rather than matched against a fixed list, because the roster is the
+      // user's, not the app's.
       var seen = [];
-      var nodes = document.querySelectorAll('button, [role="option"], [role="menuitem"], li, span, div');
-      for (var i = 0; i < nodes.length && seen.length < 12; i++) {
-        var el = nodes[i];
-        if (el.children.length > 0) continue;
-        var t = (el.textContent || '').trim();
-        if (names.indexOf(t) !== -1 && seen.indexOf(t) === -1) seen.push(t);
+      var menus = document.querySelectorAll('[role="menu"]');
+      var menu = menus[menus.length - 1];
+      if (!menu) return seen;
+      var items = menu.querySelectorAll('[role="menuitem"], [role="option"], button');
+      for (var i = 0; i < items.length && seen.length < 12; i++) {
+        // Each entry carries a title and a description; take the title.
+        var title = '';
+        var leaves = items[i].querySelectorAll('*');
+        for (var j = 0; j < leaves.length; j++) {
+          if (leaves[j].children.length > 0) continue;
+          var lt = (leaves[j].textContent || '').trim().replace(/\s+/g, ' ');
+          if (lt && lt.length <= 24) { title = lt; break; }
+        }
+        if (!title) {
+          var whole = (items[i].textContent || '').trim().replace(/\s+/g, ' ');
+          title = whole.slice(0, 24);
+        }
+        if (title && seen.indexOf(title) === -1) seen.push(title);
       }
       return seen;
     })(),
     nav: window.__dshNav || '',
+    menu: window.__dshMenu || null,
     theme: (function(){
       // The theme tokens are not resolvable from :root, so sample what the
       // browser actually painted instead: aggregate every element's background
@@ -517,7 +607,8 @@ func (a *app) scheduleProbe() {
       };
       return out;
     })(),
-    errors: (window.__dshErrors || []).slice(0, 10)
+    errors: (window.__dshErrors || []).slice(0, 10),
+    resourceErrors: (window.__dshResourceErrors || []).slice(0, 10)
   };
   __dshSelfTest(JSON.stringify(info));
 })();`)
@@ -540,9 +631,11 @@ func (a *app) printSelfTest() int {
 		BodyText      string         `json:"bodyText"`
 		PresetOptions []string       `json:"presetOptions"`
 		Nav           string         `json:"nav"`
+		Menu          map[string]any `json:"menu"`
 		Diag          map[string]any `json:"diag"`
 		Theme         map[string]any `json:"theme"`
 		Errors        []string       `json:"errors"`
+		ResourceErrs  []string       `json:"resourceErrors"`
 		RootKids      int            `json:"rootChildren"`
 		StyleShee     int            `json:"stylesheets"`
 	}
@@ -552,23 +645,25 @@ func (a *app) printSelfTest() int {
 	}
 	loaded := got.HasRoot && got.BodyText != "" && len(got.Errors) == 0
 	out := map[string]any{
-		"ok":            loaded,
-		"url":           got.URL,
-		"title":         got.Title,
-		"readyState":    got.Ready,
-		"hasRoot":       got.HasRoot,
-		"rootChildren":  got.RootKids,
-		"buttons":       got.Buttons,
-		"stylesheets":   got.StyleShee,
-		"bodyText":      got.BodyText,
-		"presetOptions": got.PresetOptions,
-		"nav":           got.Nav,
-		"diag":          got.Diag,
-		"early":         a.early,
-		"theme":         got.Theme,
-		"pageErrors":    got.Errors,
-		"hostLogTail":   strings.TrimSpace(a.log.String()),
-		"profile":       a.cfg.profile,
+		"ok":             loaded,
+		"url":            got.URL,
+		"title":          got.Title,
+		"readyState":     got.Ready,
+		"hasRoot":        got.HasRoot,
+		"rootChildren":   got.RootKids,
+		"buttons":        got.Buttons,
+		"stylesheets":    got.StyleShee,
+		"bodyText":       got.BodyText,
+		"presetOptions":  got.PresetOptions,
+		"nav":            got.Nav,
+		"menu":           got.Menu,
+		"diag":           got.Diag,
+		"early":          a.early,
+		"theme":          got.Theme,
+		"pageErrors":     got.Errors,
+		"resourceErrors": got.ResourceErrs,
+		"hostLogTail":    strings.TrimSpace(a.log.String()),
+		"profile":        a.cfg.profile,
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
@@ -649,11 +744,19 @@ func (a *app) startHost() {
 // runHost performs one boot attempt on a specific port. It reports whether the
 // host published its URL, so the caller can decide between success, a retry, and
 // an error.
-func (a *app) runHost(bin string, prefix []string, port int) (bool, error) {
-	args := append(append([]string{}, prefix...), "web",
-		"--port", strconv.Itoa(port), "--no-open")
+// hostArgs builds the command line for the Harness host.
+//
+// The profile name is also the app name: `dsh web` boots the "web" profile,
+// and --profile selects one explicitly. Passing both would make the second
+// name a stray argument, so the profile goes in as the flag only.
+func hostArgs(prefix []string, profile string, port int) []string {
+	args := append([]string{}, prefix...)
+	args = append(args, "--profile", profile, "--port", strconv.Itoa(port), "--no-open")
+	return args
+}
 
-	cmd := exec.Command(bin, args...)
+func (a *app) runHost(bin string, prefix []string, port int) (bool, error) {
+	cmd := exec.Command(bin, hostArgs(prefix, a.cfg.profile, port)...)
 	cmd.Env = append(os.Environ(), "DSH_TELEMETRY_DISABLED=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own process group: one signal reaches every child
 	if a.cfg.verbose {
@@ -753,7 +856,7 @@ func (a *app) showError(title, detail, tail string) {
 			return
 		}
 		a.w.SetTitle(appName + " — error")
-		a.w.SetHtml(errorPage(title, detail, tail))
+		a.w.SetHtml(errorPage(a.cfg, title, detail, tail))
 	})
 }
 
@@ -841,85 +944,376 @@ func (t *tail) String() string {
 }
 
 // ---------------------------------------------------------------------------
+// the desktop's colour scheme
+// ---------------------------------------------------------------------------
+
+// systemScheme reports the desktop's colour scheme: "light", "dark", or ""
+// when the desktop does not say.
+//
+// The XDG desktop portal is asked first: it is the cross-desktop answer --
+// Plasma and GNOME both publish it -- and it is the one that survives a
+// desktop whose own settings file disagrees with the GTK bridge. The GNOME
+// interface key is the fallback, and it is also what the portal commonly
+// proxies, so the two usually agree.
+func systemScheme() string {
+	if scheme := portalScheme(); scheme != "" {
+		return scheme
+	}
+	out, err := exec.Command("gsettings", "get", "org.gnome.desktop.interface", "color-scheme").Output()
+	if err != nil {
+		return ""
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "'prefer-dark'":
+		return "dark"
+	case "'prefer-light'":
+		return "light"
+	}
+	return ""
+}
+
+// portalScheme asks the portal for org.freedesktop.appearance color-scheme.
+// The spec numbers it: 0 no preference, 1 prefer dark, 2 prefer light.
+func portalScheme() string {
+	out, err := exec.Command("gdbus", "call", "--session",
+		"--dest", "org.freedesktop.portal.Desktop",
+		"--object-path", "/org/freedesktop/portal/desktop",
+		"--method", "org.freedesktop.portal.Settings.Read",
+		"org.freedesktop.appearance", "color-scheme").Output()
+	if err != nil {
+		return ""
+	}
+	return portalSchemeValue(string(out))
+}
+
+// portalSchemeValue pulls the uint32 out of the portal's reply, which looks
+// like "(<<uint32 2>>,)".
+func portalSchemeValue(out string) string {
+	m := portalUint32.FindStringSubmatch(out)
+	if m == nil {
+		return ""
+	}
+	switch m[1] {
+	case "1":
+		return "dark"
+	case "2":
+		return "light"
+	}
+	return ""
+}
+
+// watchSystemTheme follows the desktop's colour scheme through an event hook.
+//
+// WebKitGTK resolves prefers-color-scheme once, when the view is created. A
+// scheme change made while the app is open never reaches the page: the media
+// query does not change, so the client -- which follows the system by default
+// -- keeps painting the theme it started with.
+//
+// Polling would fix that at the cost of waking up forever to discover nothing
+// changed. So the shell subscribes instead: the portal emits SettingChanged
+// the moment the desktop's scheme does, and this blocks on that stream. Two
+// subscribers exist because they cover different desktops, and both are
+// event-driven, so an idle window costs nothing.
+func (a *app) watchSystemTheme() {
+	for a.alive.Load() {
+		lines, stop := subscribeScheme()
+		if lines == nil {
+			return // nothing to subscribe to; the boot value stands
+		}
+		a.themeStop.Store(stop)
+		for line := range lines {
+			scheme := schemeFromSignal(line)
+			if scheme == "" {
+				continue
+			}
+			a.applyScheme(scheme)
+		}
+		stop()
+		if !a.alive.Load() {
+			return
+		}
+		// The stream ended without the window closing, so the helper was
+		// killed out from under us. Start it again after a beat.
+		time.Sleep(time.Second)
+	}
+}
+
+// subscribeScheme starts the cheapest available listener and returns the
+// lines it emits, plus a function that stops it. A nil channel means the
+// desktop offers neither.
+func subscribeScheme() (<-chan string, func()) {
+	type listener struct {
+		bin  string
+		args []string
+		// match reports whether the line is a colour-scheme change at all.
+		match func(string) bool
+	}
+	candidates := []listener{
+		{
+			// The portal's own stream: one line per signal, naming the
+			// namespace, the key and the value.
+			bin:  "gdbus",
+			args: []string{"monitor", "--session", "--dest", "org.freedesktop.portal.Desktop"},
+			match: func(line string) bool {
+				return strings.Contains(line, "org.freedesktop.appearance")
+			},
+		},
+		{
+			bin:  "gsettings",
+			args: []string{"monitor", "org.gnome.desktop.interface", "color-scheme"},
+			match: func(line string) bool {
+				return strings.HasPrefix(strings.TrimSpace(line), "color-scheme:")
+			},
+		},
+	}
+
+	for _, l := range candidates {
+		if _, err := exec.LookPath(l.bin); err != nil {
+			continue
+		}
+		cmd := exec.Command(l.bin, l.args...)
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			continue
+		}
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+			// If the shell is killed outright -- SIGKILL, a crash, the
+			// session manager tearing the process down -- the kernel takes
+			// the listener with it instead of leaving it behind forever.
+			Pdeathsig: syscall.SIGTERM,
+		}
+		if err := cmd.Start(); err != nil {
+			continue
+		}
+
+		out := make(chan string, 4)
+		go func() {
+			defer close(out)
+			sc := bufio.NewScanner(stdout)
+			sc.Buffer(make([]byte, 0, 8<<10), 256<<10)
+			for sc.Scan() {
+				if l.match(sc.Text()) {
+					select {
+					case out <- sc.Text():
+					default: // a burst of signals: the newest reading wins anyway
+					}
+				}
+			}
+		}()
+
+		stop := func() {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			_, _ = cmd.Process.Wait()
+		}
+		return out, stop
+	}
+	return nil, func() {}
+}
+
+// schemeFromSignal decodes one line of either stream. Both name the scheme;
+// the portal numbers it and gsettings quotes it.
+func schemeFromSignal(line string) string {
+	if strings.Contains(line, "org.freedesktop.appearance") {
+		return portalSchemeValue(line)
+	}
+	switch {
+	case strings.Contains(line, "'prefer-dark'"):
+		return "dark"
+	case strings.Contains(line, "'prefer-light'"):
+		return "light"
+	}
+	// gsettings also reports "default", which is "no preference". The portal
+	// is the better authority for that case, so ask it once.
+	if strings.Contains(line, "'default'") {
+		return portalScheme()
+	}
+	return ""
+}
+
+// applyScheme tells the page which scheme the desktop is in. The page decides
+// whether to act on it: a theme pinned in Settings -> Appearance is the
+// user's, not the desktop's.
+func (a *app) applyScheme(scheme string) {
+	if !a.alive.Load() || scheme == "" {
+		return
+	}
+	a.w.Dispatch(func() {
+		a.w.Eval(`(function(){
+  window.__dshDesktopScheme = ` + strconv.Quote(scheme) + `;
+  if (window.__dshApplyScheme) window.__dshApplyScheme();
+})();`)
+	})
+}
+
+// ---------------------------------------------------------------------------
 // pages
 // ---------------------------------------------------------------------------
+
+// schemeFollowJS returns the script that keeps the client on the desktop's
+// colour scheme.
+//
+// The engine only resolves prefers-color-scheme once, so the shell watches the
+// desktop instead and hands the answer in through window.__dshDesktopScheme.
+// This script applies that answer, and then defends it: the client's theme
+// presenter repaints from the stale media query whenever it publishes a
+// snapshot, which would otherwise flip the window back to the theme it
+// started in. A MutationObserver catches that and re-applies the desktop's
+// answer, so the correction costs nothing while nothing is happening.
+//
+// It only speaks for a client that is following the system: once a theme is
+// pinned in Settings -> Appearance, data-ds-theme-source stops being "system"
+// and this script stands down.
+func schemeFollowJS() string {
+	return `  (function(){
+    function apply() {
+      var want = window.__dshDesktopScheme;
+      if (!want) return;
+      var root = document.documentElement, body = document.body;
+      if (!root || !body) return;
+      if (root.getAttribute('data-ds-theme-source') !== 'system') return;
+      var dark = want === 'dark';
+      if (body.hasAttribute('data-ds-dark-theme') === dark) return;
+      body.toggleAttribute('data-ds-dark-theme', dark);
+      root.style.colorScheme = want;
+    }
+    window.__dshApplyScheme = apply;
+
+    function watch() {
+      apply();
+      if (!window.MutationObserver || !document.body) return;
+      new MutationObserver(apply).observe(document.body, {
+        attributes: true,
+        attributeFilter: ['data-ds-dark-theme', 'data-ds-theme-source']
+      });
+    }
+    if (document.body) watch();
+    else document.addEventListener('DOMContentLoaded', watch);
+  })();`
+}
+
+// schemeAttr renders the html attribute that pins the boot screen to the
+// desktop's colour scheme. The media query in the stylesheet would do the same
+// thing if the engine knew the answer, but the engine only looks once, at
+// startup, and the desktop can change its mind after that.
+func schemeAttr() string {
+	if scheme := systemScheme(); scheme != "" {
+		return ` data-ds-scheme="` + scheme + `"`
+	}
+	return ""
+}
 
 // pageStyle dresses the boot and error screens in the client's own palette so the
 // window does not flash a different colour before the app paints. These are the
 // values the running client actually paints, measured from the live document
 // rather than guessed:
 //
-//	base background   rgb(21, 21, 23)     #151517
-//	raised surface    rgb(27, 27, 28)     #1b1b1c
-//	stronger border   rgb(44, 44, 46)     #2c2c2e
-//	primary label     rgb(249, 250, 251)  #f9fafb
-//	secondary label   rgb(173, 178, 184)  #adb2b8
-//	tertiary label    rgb(129, 133, 140)  #81858c
+//	                   light      dark
+//	base background    #ffffff    #151517
+//	raised surface     #f5f6f7    #1b1b1c
+//	border             #0000001f  #2c2c2e
+//	primary label      #0f1115    #f9fafb
+//	secondary label    #61666b    #cfd3d6
+//	tertiary label     #81858c    #adb2b8
 //
-// The accent stays DeepSeek blue. The client's theme is its own setting rather
-// than the desktop's, so these match the dark theme it ships with.
+// The client follows the desktop's colour scheme by default -- its theme
+// preference is "system" unless the user changes it -- so the boot screen
+// follows it too. A hardcoded dark splash under a light desktop is a visible
+// flash of the wrong theme on every launch, and it is the first thing the
+// user sees.
+//
+// The accent stays DeepSeek blue, in the client's own two shades.
 const pageStyle = `
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: light dark;
+    --bg: light-dark(#ffffff, #151517);
+    --surface: light-dark(#f5f6f7, #1b1b1c);
+    --border: light-dark(#0000001f, #2c2c2e);
+    --text: light-dark(#0f1115, #f9fafb);
+    --text-2: light-dark(#61666b, #cfd3d6);
+    --text-3: light-dark(#81858c, #adb2b8);
+    --accent: light-dark(#4176e6, #4d93f8);
+    --error: light-dark(#ec1313, #f25a5a);
+  }
+  /* The desktop's scheme, when the shell knows it. */
+  :root[data-ds-scheme="light"] { color-scheme: light; }
+  :root[data-ds-scheme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
-  html, body { height: 100%%; margin: 0; background: #151517; }
+  html, body { height: 100%%; margin: 0; background: var(--bg); }
   body {
     display: flex; align-items: center; justify-content: center;
-    background: #151517; color: #f9fafb;
+    background: var(--bg); color: var(--text);
     font: 14px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     -webkit-user-select: none; user-select: none;
   }
   .card { width: min(560px, 84vw); text-align: center; }
   h1 { font-size: 17px; font-weight: 600; margin: 0 0 6px; letter-spacing: .01em; }
-  p { margin: 0; color: #adb2b8; }
-  strong { color: #f9fafb; font-weight: 600; }
+  p { margin: 0; color: var(--text-2); }
+  strong { color: var(--text); font-weight: 600; }
   .spinner {
     width: 26px; height: 26px; margin: 0 auto 20px;
-    border: 2px solid #2c2c2e; border-top-color: #4d6bfe; border-radius: 50%%;
+    border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%%;
     animation: spin .8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .err { border-color: #2c2c2e; border-top-color: #e5484d; animation: none; }
+  .err { border-color: var(--border); border-top-color: var(--error); animation: none; }
   pre {
     margin: 20px 0 0; padding: 14px; max-height: 34vh; overflow: auto; text-align: left;
-    background: #1b1b1c; border: 1px solid #2c2c2e; border-radius: 8px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
     font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #adb2b8; white-space: pre-wrap; word-break: break-word;
+    color: var(--text-2); white-space: pre-wrap; word-break: break-word;
     -webkit-user-select: text; user-select: text;
   }
-  .hint { margin-top: 18px; font-size: 12.5px; color: #81858c; }
-  code { background: #1b1b1c; border: 1px solid #2c2c2e; border-radius: 4px; padding: 1px 5px; font-size: 12px; color: #adb2b8; }
+  .hint { margin-top: 18px; font-size: 12.5px; color: var(--text-3); }
+  code { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12px; color: var(--text-2); }
 `
 
-// pageHead carries the colour-scheme hint that stops WebKit painting a white
-// canvas in the moment before the stylesheet above applies.
-const pageHead = `<meta charset="utf-8"><meta name="color-scheme" content="dark">`
+// pageHead carries the colour-scheme hint that stops WebKit painting a canvas
+// in the wrong colour in the moment before the stylesheet above applies. It
+// names both schemes, so the canvas follows the desktop rather than being
+// pinned to one.
+const pageHead = `<meta charset="utf-8"><meta name="color-scheme" content="light dark">`
 
-// readableSurfacesCSS makes the client's translucent menus opaque.
+// readableSurfacesCSS makes the client's translucent menus opaque, and follows
+// the client's own light/dark theme while doing it.
 //
-// The client styles menu surfaces as `--dsw-menu-surface-fill: #43454a73` -- 45%
-// opaque -- and relies on `backdrop-filter: blur(40px)` for contrast. That works
-// on Chromium, where the blur composites the page behind the menu. On the
-// WebKitGTK path this app uses, the blur does not composite, so the menu renders
-// as a see-through panel and its labels are unreadable against the content
-// underneath.
+// The client styles menu surfaces as `--dsw-menu-surface-fill` -- 45% opaque
+// in the dark theme (#43454a73), 58% in the light one (#f8f9fa94) -- and leans
+// on `backdrop-filter: blur(40px)` for contrast. That works on Chromium, where
+// the blur composites the page behind the menu. On the WebKitGTK path this app
+// uses, the blur does not composite, so the menu draws as a see-through panel
+// and its labels are unreadable against the content underneath.
 //
-// The replacement is that same fill composited over the base background:
+// So the blur goes, and the translucent fill is replaced by the same colour
+// made opaque:
 //
-//	#43454a at 45% over #151517  ->  #2a2b2e
+//	light theme   #f8f9fa94 over #fff     ->  #f8f9fa
+//	dark theme    #43454a73 over #151517   ->  #2a2b2e
 //
-// which is what the menu is meant to look like once the blur has done its work.
-// The fill no longer depends on the blur, so the blur is switched off with it.
+// The replacement has to follow the theme, because the labels inside the menu
+// are themed too: a dark panel under light-theme labels is the very
+// unreadable combination this is meant to remove, and that is what a fixed
+// dark fill produces on a light desktop.
+//
+// The client marks the dark theme with `data-ds-dark-theme` on <body> and
+// removes the attribute for the light one, so the two rules below track the
+// live theme instead of guessing it at boot.
 const readableSurfacesCSS = `
 :root, body {
-  --dsw-menu-surface-fill: #2a2b2e !important;
   --dsw-menu-backdrop-filter: none !important;
+}
+body:not([data-ds-dark-theme]) {
+  --dsw-menu-surface-fill: #f8f9fa !important;
+}
+body[data-ds-dark-theme] {
+  --dsw-menu-surface-fill: #2a2b2e !important;
 }
 `
 
-// readableSurfacesJS returns the script that installs readableSurfacesCSS into
-// the document. It runs from Init, so it is in place before the client's own
+// shellCSSJS returns the script that installs the shell's stylesheet into the
+// document. It runs from Init, so it is in place before the client's own
 // stylesheet and survives the navigation from the boot screen to the app.
-func readableSurfacesJS(cfg config) string {
+func shellCSSJS(cfg config) string {
 	if !cfg.opaqueMenus {
 		return ""
 	}
@@ -939,7 +1333,7 @@ func readableSurfacesJS(cfg config) string {
 
 func loadingPage(cfg config) string {
 	return `<!doctype html>
-<html><head>` + pageHead + `<title>` + appName + `</title>
+<html` + schemeAttr() + `><head>` + pageHead + `<title>` + appName + `</title>
 <style>` + fmt.Sprintf(pageStyle) + `</style></head>
 <body><div class="card">
   <div class="spinner"></div>
@@ -949,7 +1343,7 @@ func loadingPage(cfg config) string {
 </div></body></html>`
 }
 
-func errorPage(title, detail, output string) string {
+func errorPage(cfg config, title, detail, output string) string {
 	body := `<div class="card">
   <div class="spinner err"></div>
   <h1>` + html.EscapeString(title) + `</h1>
@@ -960,7 +1354,7 @@ func errorPage(title, detail, output string) string {
 	body += `<div class="hint">Check that the CLI runs: <code>dsh web</code>. Override the binary with <code>--dsh &lt;path&gt;</code>.</div>
 </div>`
 	return `<!doctype html>
-<html><head>` + pageHead + `<title>` + appName + ` — error</title>
+<html` + schemeAttr() + `><head>` + pageHead + `<title>` + appName + ` — error</title>
 <style>` + fmt.Sprintf(pageStyle) + `</style></head>
 <body>` + body + `</body></html>`
 }

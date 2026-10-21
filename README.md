@@ -116,23 +116,64 @@ If you keep presets in another profile, pass it:
 dsh-desktop -profile work
 ```
 
+The profile name is also the app name — `dsh web` boots the "web" profile — so
+the flag is handed to the host as `--profile <name>`.
+
 ### Unreadable menus
 
-The client styles menu surfaces as `--dsw-menu-surface-fill: #43454a73` — 45%
-opaque — and leans on `backdrop-filter: blur(40px)` for contrast. That works on
-Chromium, where the blur composites the page behind the menu. On this render path
-the blur does not composite, so the menu draws as a see-through panel and its
-labels are hard to read against the content underneath.
+The client styles menu surfaces as `--dsw-menu-surface-fill` — 45% opaque in the
+dark theme (`#43454a73`), 58% in the light one (`#f8f9fa94`) — and leans on
+`backdrop-filter: blur(40px)` for contrast. That works on Chromium, where the
+blur composites the page behind the menu. On this render path the blur does not
+composite, so the menu draws as a see-through panel and its labels are hard to
+read against the content underneath.
 
 `-opaque-menus` (on by default) replaces the fill with the same colour made
 opaque, which is what the menu looks like once the blur has done its work:
 
 ```
-#43454a at 45% over the #151517 base  ->  #2a2b2e
+dark theme   #43454a at 45% over the #151517 base  ->  #2a2b2e
+light theme  #f8f9fa over the #ffffff base          ->  #f8f9fa
 ```
 
 The blur is switched off with it, since nothing depends on it any more. Pass
 `-opaque-menus=false` to keep the upstream translucency.
+
+**The replacement follows the client's theme**, because the labels inside the
+menu are themed too. The client marks its dark theme with `data-ds-dark-theme`
+on `<body>`, so the two rules track it live. A fixed dark fill does not: under
+a light theme it paints a dark panel behind dark labels — a menu that opens
+and looks like nothing at all.
+
+### The theme
+
+The client follows the desktop's colour scheme — its theme preference is
+`system` unless you change it in Settings → Appearance. The shell follows it
+too, and keeps following it.
+
+WebKitGTK resolves `prefers-color-scheme` once, when the view is created, so a
+scheme change made while the app is open never reaches the page: the media
+query does not change, and the client keeps painting the theme it started
+with.
+
+The shell therefore subscribes instead of polling. `gdbus monitor` watches the
+portal's `SettingChanged` signal — the XDG appearance stream that Plasma and
+GNOME both publish — and `gsettings monitor` is the fallback, so the window
+learns about a change the moment it happens and costs nothing while nothing
+does. The answer is handed to the page, which repaints the client from it.
+
+That hand-off has to be defended: the client's own theme presenter repaints
+from the stale media query whenever it publishes a snapshot, which would flip
+the window back. A `MutationObserver` on `<body>` catches that and re-applies
+the desktop's answer, so the correction is event-driven too.
+
+A theme pinned in Settings → Appearance belongs to the user, not to the
+desktop: the shell only speaks for the client while it is following the
+system (`data-ds-theme-source="system"`), and stops as soon as it is pinned.
+
+The menus follow the client wherever it ends up: the shell's override keys off
+the client's own `data-ds-dark-theme` attribute, so the app in light mode gets
+light menus and the app in dark mode gets dark ones, both readable.
 
 ### Blank window?
 
@@ -208,7 +249,14 @@ what it finds:
   PASS client UI is interactive
   PASS stylesheet bundle applied
   PASS no page-level errors
-  PASS montir preset on the roster
+  PASS reached the empty-session view
+  PASS agent presets on the roster
+  PASS agent preset menu opened
+  PASS menu surface is opaque
+  PASS workspace picker opened
+  PASS workspace menu is opaque
+  PASS menu fill follows the theme
+  PASS menu labels contrast with the surface
 2. clean shutdown
   PASS no orphan processes left behind
 ```

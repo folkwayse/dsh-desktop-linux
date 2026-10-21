@@ -425,8 +425,23 @@ func notifyUpdate(current, latest string) {
 func updateBannerJS() string {
 	return `  (function(){
     var ID = 'dsh-desktop-update';
+    // The banner is the shell's own widget, so it cannot borrow the client's
+    // tokens: the boot page does not have them, and the app may be themed
+    // differently from the desktop. It therefore follows the client's live
+    // theme when there is one, and the desktop's scheme otherwise.
+    function palette() {
+      var body = document.body;
+      var dark = body && body.hasAttribute('data-ds-dark-theme');
+      if (!dark && body && typeof matchMedia === 'function') {
+        dark = matchMedia('(prefers-color-scheme: dark)').matches;
+      }
+      return dark
+        ? { bg:'#1b1b1c', fg:'#f9fafb', dim:'#adb2b8', border:'#2c2c2e', shadow:'rgba(0,0,0,.45)' }
+        : { bg:'#ffffff', fg:'#0f1115', dim:'#61666b', border:'#0000001f', shadow:'rgba(0,0,0,.18)' };
+    }
     function show(msg) {
       if (!msg || document.getElementById(ID)) return;
+      var p = palette();
       var box = document.createElement('div');
       box.id = ID;
       box.setAttribute('role', 'status');
@@ -441,10 +456,10 @@ func updateBannerJS() string {
       box.appendChild(close);
       box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;' +
         'display:flex;align-items:center;gap:10px;max-width:min(520px,80vw);' +
-        'padding:10px 12px;border-radius:10px;border:1px solid #2c2c2e;border-left:3px solid #4d6bfe;' +
-        'background:#1b1b1c;color:#f9fafb;font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;' +
-        'box-shadow:0 8px 24px rgba(0,0,0,.45);';
-      close.style.cssText = 'all:unset;cursor:pointer;color:#adb2b8;font-size:15px;line-height:1;padding:2px 4px;';
+        'padding:10px 12px;border-radius:10px;border:1px solid ' + p.border + ';border-left:3px solid #4d6bfe;' +
+        'background:' + p.bg + ';color:' + p.fg + ';font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;' +
+        'box-shadow:0 8px 24px ' + p.shadow + ';';
+      close.style.cssText = 'all:unset;cursor:pointer;color:' + p.dim + ';font-size:15px;line-height:1;padding:2px 4px;';
       (document.body || document.documentElement).appendChild(box);
     }
     window.__dshUpdateNoticeNow = function(){
